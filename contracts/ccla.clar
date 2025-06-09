@@ -977,3 +977,46 @@
         (validate-path-hops path (+ index u1) length)
         err-invalid-path
       )
+    )
+  )
+)
+
+;; Update price from oracle
+(define-public (update-price
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (price uint))
+  
+  (let (
+    (caller tx-sender)
+    (oracle (unwrap! (map-get? price-oracles { chain-id: chain-id, token-id: token-id }) err-oracle-not-found))
+  )
+    ;; Ensure caller is the oracle contract
+    (asserts! (is-eq caller (get oracle-contract oracle)) err-not-authorized)
+    
+    ;; Check for price deviation
+    (let (
+      (last-price (get last-price oracle))
+      (deviation-threshold (get deviation-threshold oracle))
+    )
+      (if (> last-price u0)
+        (let (
+          (price-change (if (> price last-price)
+                           (- price last-price)
+                           (- last-price price)))
+          (percentage-change (/ (* price-change u10000) last-price))
+        )
+          ;; Check if price change exceeds deviation threshold
+          (asserts! (<= percentage-change deviation-threshold) err-price-deviation)
+        )
+        true
+      )
+      
+      ;; Update price
+      (map-set price-oracles
+        { chain-id: chain-id, token-id: token-id }
+        (merge oracle {
+          last-price: price,
+          last-updated: block-height
+        })
+      )
