@@ -480,3 +480,43 @@
       { chain-id: chain-id, token-id: token-id, provider: provider }
       (merge provider-record {
         liquidity-amount: (- (get liquidity-amount provider-record) amount),
+    last-withdrawal-block: (some block-height)
+      })
+    )
+    
+    ;; Transfer tokens back to provider
+    (if (is-eq chain-id "stacks")
+      ;; For STX tokens
+      (if (is-eq token-id "stx")
+        (as-contract (try! (stx-transfer? amount (as-contract tx-sender) provider)))
+        ;; For other tokens on Stacks
+        (as-contract (try! (contract-call? (get token-contract pool) transfer amount (as-contract tx-sender) provider none)))
+      )
+      ;; For tokens on other chains, call adapter contract
+      (as-contract (try! (contract-call? (get adapter-contract chain) release-funds token-id amount (as-contract tx-sender) provider)))
+    )
+    
+    (ok amount)
+  )
+)
+;; Initiate a cross-chain swap
+(define-public (initiate-cross-chain-swap
+  (source-chain (string-ascii 20))
+  (source-token (string-ascii 20))
+  (source-amount uint)
+  (target-chain (string-ascii 20))
+  (target-token (string-ascii 20))
+  (recipient principal)
+  (hash-lock (buff 32))
+  (execution-path (list 5 { chain: (string-ascii 20), token: (string-ascii 20), pool: principal }))
+  (slippage-bp uint))
+  
+  (let (
+    (initiator tx-sender)
+    (swap-id (var-get next-swap-id))
+    (timeout-block (+ block-height (var-get default-timeout-blocks)))
+    (routing-valid (validate-execution-path source-chain source-token target-chain target-token execution-path))
+  )
+    ;; Check for emergency shutdown
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
