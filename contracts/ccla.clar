@@ -266,3 +266,47 @@
       { chain-id: chain-id, token-id: token-id }
       {
         token-contract: token-contract,
+    total-liquidity: u0,
+        available-liquidity: u0,
+        committed-liquidity: u0,
+        min-swap-amount: min-swap-amount,
+        max-swap-amount: max-swap-amount,
+        fee-bp: fee-bp,
+        active: true,
+        last-volume-24h: u0,
+        cumulative-volume: u0,
+        cumulative-fees: u0,
+        last-price: u0,
+        creation-block: block-height,
+        last-updated: block-height
+      }
+    )
+       (ok { chain: chain-id, token: token-id })
+  )
+)
+
+;; Map a token across chains
+(define-public (map-token
+  (source-chain (string-ascii 20))
+  (source-token (string-ascii 20))
+  (target-chain (string-ascii 20))
+  (target-token (string-ascii 20)))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-some (map-get? chains { chain-id: source-chain })) err-chain-not-found)
+    (asserts! (is-some (map-get? chains { chain-id: target-chain })) err-chain-not-found)
+    
+    ;; Create token mapping
+    (map-set token-mappings
+      { source-chain: source-chain, source-token: source-token, target-chain: target-chain }
+      { target-token: target-token }
+    )
+    
+    ;; Create reverse mapping
+    (map-set token-mappings
+      { source-chain: target-chain, source-token: target-token, target-chain: source-chain }
+      { target-token: source-token }
+    )
+    
+    (ok true)
