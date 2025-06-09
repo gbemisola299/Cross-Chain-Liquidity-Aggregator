@@ -557,3 +557,89 @@
           (try! (contract-call? (get adapter-contract source-chain-info) lock-funds source-token source-amount initiator (as-contract tx-sender)))
         )
         
+
+        ;; Update available liquidity
+        (map-set liquidity-pools
+          { chain-id: source-chain, token-id: source-token }
+          (merge source-pool {
+            available-liquidity: (- (get available-liquidity source-pool) net-amount),
+            committed-liquidity: (+ (get committed-liquidity source-pool) net-amount),
+            cumulative-volume: (+ (get cumulative-volume source-pool) source-amount),
+            cumulative-fees: (+ (get cumulative-fees source-pool) pool-fee),
+            last-updated: block-height
+          })
+        )
+        
+        ;; Create swap record
+        (map-set swaps
+          { swap-id: swap-id }
+          {
+            initiator: initiator,
+            source-chain: source-chain,
+            source-token: source-token,
+            source-amount: source-amount,
+            target-chain: target-chain,
+            target-token: target-token,
+            target-amount: estimated-output,
+            recipient: recipient,
+            timeout-block: timeout-block,
+            hash-lock: hash-lock,
+            preimage: none,
+            status: u0, ;; Pending
+            execution-path: execution-path,
+            max-slippage-bp: slippage-bp,
+            protocol-fee: protocol-fee,
+            relayer-fee: relayer-fee,
+            relayer: none,
+            creation-block: block-height,
+            completion-block: none,
+            ref-hash: ref-hash
+          }
+        )
+        
+        ;; Increment swap ID
+        (var-set next-swap-id (+ swap-id u1))
+        
+         (ok { 
+          swap-id: swap-id, 
+          timeout-block: timeout-block, 
+          estimated-output: estimated-output,
+          ref-hash: ref-hash
+        })
+      )
+    )
+  )
+)
+
+;; Generate reference hash for cross-chain tracking
+(define-private (generate-ref-hash (swap-id uint) (hash-lock (buff 32)) (block uint))
+  (to-ascii (keccak256 (concat (to-consensus-buff swap-id) 
+                              (concat hash-lock (to-consensus-buff block)))))
+)
+
+;; Execute a cross-chain swap with preimage
+(define-public (execute-cross-chain-swap
+  (swap-id uint)
+  (preimage (buff 32)))
+  
+  (let (
+    (executor tx-sender)
+    (swap (unwrap! (map-get? swaps { swap-id: swap-id }) err-swap-not-found))
+    (hash-lock (get hash-lock swap))
+  )
+    ;; Check for emergency shutdown
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+    ;; Validate swap state
+    (asserts! (is-eq (get status swap) u0) err-already-executed) ;; Must be pending
+    (asserts! (< block-height (get timeout-block swap)) err-timeout-expired) ;; Must not be expired
+    
+    ;; Verify preimage
+    (asserts! (is-eq (sha256 preimage) hash-lock) err-invalid-preimage)
+    
+    ;; Check target chain and token
+    (let (
+      (target-chain (get target-chain swap))
+      (target-token (get target-token swap))
+      (target-amount (get target-amount swap))
+      (recipient (get recipient swap))
