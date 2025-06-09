@@ -933,3 +933,47 @@
     (path-length (len path))
     (first-hop (unwrap! (element-at path u0) err-invalid-path))
     (last-hop (unwrap! (element-at path (- path-length u1)) err-invalid-path))
+   )
+    ;; Check that path starts and ends at correct chains/tokens
+    (if (and 
+          (is-eq (get chain first-hop) source-chain)
+          (is-eq (get token first-hop) source-token)
+          (is-eq (get chain last-hop) target-chain)
+          (is-eq (get token last-hop) target-token)
+        )
+      ;; Validate each hop
+      (validate-path-hops path u0 path-length)
+      err-invalid-path
+    )
+  )
+)
+
+;; Helper to validate each hop in a path
+(define-private (validate-path-hops
+  (path (list 5 { chain: (string-ascii 20), token: (string-ascii 20), pool: principal }))
+  (index uint)
+  (length uint))
+  
+  (if (>= index (- length u1))
+    (ok true) ;; All hops validated
+    (let (
+      (current-hop (unwrap! (element-at path index) err-invalid-path))
+      (next-hop (unwrap! (element-at path (+ index u1)) err-invalid-path))
+      (current-chain (get chain current-hop))
+      (current-token (get token current-hop))
+      (next-chain (get chain next-hop))
+      (next-token (get token next-hop))
+      (token-mapping (map-get? token-mappings { 
+        source-chain: current-chain, 
+        source-token: current-token, 
+        target-chain: next-chain 
+      }))
+    )
+      ;; Check if token mapping exists and is correct
+      (if (and 
+            (is-some token-mapping)
+            (is-eq (get target-token (unwrap-panic token-mapping)) next-token)
+          )
+        (validate-path-hops path (+ index u1) length)
+        err-invalid-path
+      )
