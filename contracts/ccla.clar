@@ -727,3 +727,42 @@
         )
           (as-contract (try! (stx-transfer? treasury-amount (as-contract tx-sender) (var-get treasury-address))))
         )
+        (ok { 
+          swap-id: swap-id, 
+          recipient: recipient, 
+          amount: target-amount,
+          preimage: preimage
+        })
+      )
+    )
+  )
+)
+;; Refund a swap after timeout
+(define-public (refund-swap (swap-id uint))
+  (let (
+    (initiator tx-sender)
+    (swap (unwrap! (map-get? swaps { swap-id: swap-id }) err-swap-not-found))
+  )
+    ;; Validate swap state
+    (asserts! (is-eq (get status swap) u0) err-already-executed) ;; Must be pending
+    (asserts! (>= block-height (get timeout-block swap)) err-timeout-not-reached) ;; Timeout must be reached
+    (asserts! (is-eq initiator (get initiator swap)) err-not-authorized) ;; Only initiator can refund
+    
+    ;; Get source info
+    (let (
+      (source-chain (get source-chain swap))
+      (source-token (get source-token swap))
+      (source-amount (get source-amount swap))
+      (protocol-fee (get protocol-fee swap))
+      (source-pool (unwrap! (map-get? liquidity-pools { chain-id: source-chain, token-id: source-token }) err-pool-not-found))
+      (source-chain-info (unwrap! (map-get? chains { chain-id: source-chain }) err-chain-not-found))
+      (net-amount (- source-amount protocol-fee))
+    )
+      ;; Return tokens to initiator (minus protocol fee)
+      (if (is-eq source-chain "stacks")
+        ;; For STX tokens
+        (if (is-eq source-token "stx")
+          (as-contract (try! (stx-transfer? net-amount (as-contract tx-sender) initiator)))
+          ;; For other tokens on Stacks
+          (as-contract (try! (contract-call? (get token-contract source-pool) transfer net-amount (as-contract tx-sender) initiator none)))
+        )
