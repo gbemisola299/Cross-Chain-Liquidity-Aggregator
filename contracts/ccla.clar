@@ -223,3 +223,46 @@
     
     ;; Create chain record
     (map-set chains
+     { chain-id: chain-id }
+      {
+        name: name,
+        adapter-contract: adapter-contract,
+        status: u0, ;; Active
+        confirmation-blocks: confirmation-blocks,
+        block-time: block-time,
+        chain-token: chain-token,
+        btc-connection-type: btc-connection-type,
+        enabled: true,
+        base-fee: base-fee,
+        fee-multiplier: fee-multiplier,
+        last-updated: block-height
+      }
+    )
+    
+    (ok chain-id)
+  )
+)
+
+;; Register a liquidity pool
+(define-public (register-pool
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (token-contract principal)
+  (min-swap-amount uint)
+  (max-swap-amount uint)
+  (fee-bp uint))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-some (map-get? chains { chain-id: chain-id })) err-chain-not-found)
+    (asserts! (is-none (map-get? liquidity-pools { chain-id: chain-id, token-id: token-id })) err-pool-exists)
+    
+    ;; Validate parameters
+    (asserts! (< min-swap-amount max-swap-amount) err-invalid-parameters)
+    (asserts! (<= fee-bp u1000) err-invalid-parameters) ;; Maximum 10% fee
+    
+    ;; Create pool record
+    (map-set liquidity-pools
+      { chain-id: chain-id, token-id: token-id }
+      {
+        token-contract: token-contract,
