@@ -557,3 +557,253 @@
           (try! (contract-call? (get adapter-contract source-chain-info) lock-funds source-token source-amount initiator (as-contract tx-sender)))
         )
         
+
+        ;; Update available liquidity
+        (map-set liquidity-pools
+          { chain-id: source-chain, token-id: source-token }
+          (merge source-pool {
+            available-liquidity: (- (get available-liquidity source-pool) net-amount),
+            committed-liquidity: (+ (get committed-liquidity source-pool) net-amount),
+            cumulative-volume: (+ (get cumulative-volume source-pool) source-amount),
+            cumulative-fees: (+ (get cumulative-fees source-pool) pool-fee),
+            last-updated: block-height
+          })
+        )
+        
+        ;; Create swap record
+        (map-set swaps
+          { swap-id: swap-id }
+          {
+            initiator: initiator,
+            source-chain: source-chain,
+            source-token: source-token,
+            source-amount: source-amount,
+            target-chain: target-chain,
+            target-token: target-token,
+            target-amount: estimated-output,
+            recipient: recipient,
+            timeout-block: timeout-block,
+            hash-lock: hash-lock,
+            preimage: none,
+            status: u0, ;; Pending
+            execution-path: execution-path,
+            max-slippage-bp: slippage-bp,
+            protocol-fee: protocol-fee,
+            relayer-fee: relayer-fee,
+            relayer: none,
+            creation-block: block-height,
+            completion-block: none,
+            ref-hash: ref-hash
+          }
+        )
+        
+        ;; Increment swap ID
+        (var-set next-swap-id (+ swap-id u1))
+        
+         (ok { 
+          swap-id: swap-id, 
+          timeout-block: timeout-block, 
+          estimated-output: estimated-output,
+          ref-hash: ref-hash
+        })
+      )
+    )
+  )
+)
+
+;; Generate reference hash for cross-chain tracking
+(define-private (generate-ref-hash (swap-id uint) (hash-lock (buff 32)) (block uint))
+  (to-ascii (keccak256 (concat (to-consensus-buff swap-id) 
+                              (concat hash-lock (to-consensus-buff block)))))
+)
+
+;; Execute a cross-chain swap with preimage
+(define-public (execute-cross-chain-swap
+  (swap-id uint)
+  (preimage (buff 32)))
+  
+  (let (
+    (executor tx-sender)
+    (swap (unwrap! (map-get? swaps { swap-id: swap-id }) err-swap-not-found))
+    (hash-lock (get hash-lock swap))
+  )
+    ;; Check for emergency shutdown
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+    ;; Validate swap state
+    (asserts! (is-eq (get status swap) u0) err-already-executed) ;; Must be pending
+    (asserts! (< block-height (get timeout-block swap)) err-timeout-expired) ;; Must not be expired
+    
+    ;; Verify preimage
+    (asserts! (is-eq (sha256 preimage) hash-lock) err-invalid-preimage)
+    
+    ;; Check target chain and token
+    (let (
+      (target-chain (get target-chain swap))
+      (target-token (get target-token swap))
+      (target-amount (get target-amount swap))
+      (recipient (get recipient swap))
+ 
+      (target-pool (unwrap! (map-get? liquidity-pools { chain-id: target-chain, token-id: target-token }) err-pool-not-found))
+      (target-chain-info (unwrap! (map-get? chains { chain-id: target-chain }) err-chain-not-found))
+      (is-relayer (is-some (map-get? relayers { relayer: executor })))
+      (slippage-bp (get max-slippage-bp swap))
+    )
+      ;; Check sufficient liquidity
+      (asserts! (>= (get available-liquidity target-pool) target-amount) err-insufficient-liquidity)
+      
+      ;; Calculate minimum acceptable amount with slippage
+      (let (
+        (min-acceptable-amount (- target-amount (/ (* target-amount slippage-bp) u10000)))
+      )
+        ;; If swap is executed by a relayer, update relayer stats
+        (if is-relayer
+          (let (
+            (relayer-record (unwrap-panic (map-get? relayers { relayer: executor })))
+            (relayer-fee (get relayer-fee swap))
+          )
+            (map-set relayers
+              { relayer: executor }
+              (merge relayer-record {
+                transactions-processed: (+ (get transactions-processed relayer-record) u1),
+                cumulative-fees-earned: (+ (get cumulative-fees-earned relayer-record) relayer-fee),
+                last-active: block-height
+              })
+            )
+            
+            ;; Update swap with relayer info
+            (map-set swaps
+              { swap-id: swap-id }
+              (merge swap {
+                relayer: (some executor)
+              })
+            )
+            
+            ;; Process relayer payment - from protocol fees
+            (as-contract (try! (stx-transfer? relayer-fee (as-contract tx-sender) executor)))
+          )
+          true
+        )
+        
+        ;; Release target tokens to recipient
+     (if (is-eq target-chain "stacks")
+          ;; For STX tokens
+          (if (is-eq target-token "stx")
+            (as-contract (try! (stx-transfer? target-amount (as-contract tx-sender) recipient)))
+            ;; For other tokens on Stacks
+            (as-contract (try! (contract-call? (get token-contract target-pool) transfer target-amount (as-contract tx-sender) recipient none)))
+          )
+          ;; For tokens on other chains, call adapter contract
+          (as-contract (try! (contract-call? (get adapter-contract target-chain-info) release-funds target-token target-amount (as-contract tx-sender) recipient)))
+        )
+        
+        ;; Update available liquidity
+        (map-set liquidity-pools
+          { chain-id: target-chain, token-id: target-token }
+          (merge target-pool {
+            available-liquidity: (- (get available-liquidity target-pool) target-amount),
+            committed-liquidity: (+ (get committed-liquidity target-pool) target-amount),
+            last-volume-24h: (+ (get last-volume-24h target-pool) target-amount),
+            cumulative-volume: (+ (get cumulative-volume target-pool) target-amount),
+            last-updated: block-height
+          })
+        )
+        
+        ;; Mark swap as completed
+        (map-set swaps
+          { swap-id: swap-id }
+          (merge swap {
+            status: u1, ;; Completed
+            preimage: (some preimage),
+            completion-block: (some block-height)
+          })
+        )
+        
+        ;; Transfer protocol fee to treasury (minus relayer fee if applicable)
+        (let (
+          (protocol-fee (get protocol-fee swap))
+          (relayer-fee (get relayer-fee swap))
+          (treasury-amount (- protocol-fee (if is-relayer relayer-fee u0)))
+        )
+          (as-contract (try! (stx-transfer? treasury-amount (as-contract tx-sender) (var-get treasury-address))))
+        )
+        (ok { 
+          swap-id: swap-id, 
+          recipient: recipient, 
+          amount: target-amount,
+          preimage: preimage
+        })
+      )
+    )
+  )
+)
+;; Refund a swap after timeout
+(define-public (refund-swap (swap-id uint))
+  (let (
+    (initiator tx-sender)
+    (swap (unwrap! (map-get? swaps { swap-id: swap-id }) err-swap-not-found))
+  )
+    ;; Validate swap state
+    (asserts! (is-eq (get status swap) u0) err-already-executed) ;; Must be pending
+    (asserts! (>= block-height (get timeout-block swap)) err-timeout-not-reached) ;; Timeout must be reached
+    (asserts! (is-eq initiator (get initiator swap)) err-not-authorized) ;; Only initiator can refund
+    
+    ;; Get source info
+    (let (
+      (source-chain (get source-chain swap))
+      (source-token (get source-token swap))
+      (source-amount (get source-amount swap))
+      (protocol-fee (get protocol-fee swap))
+      (source-pool (unwrap! (map-get? liquidity-pools { chain-id: source-chain, token-id: source-token }) err-pool-not-found))
+      (source-chain-info (unwrap! (map-get? chains { chain-id: source-chain }) err-chain-not-found))
+      (net-amount (- source-amount protocol-fee))
+    )
+      ;; Return tokens to initiator (minus protocol fee)
+      (if (is-eq source-chain "stacks")
+        ;; For STX tokens
+        (if (is-eq source-token "stx")
+          (as-contract (try! (stx-transfer? net-amount (as-contract tx-sender) initiator)))
+          ;; For other tokens on Stacks
+          (as-contract (try! (contract-call? (get token-contract source-pool) transfer net-amount (as-contract tx-sender) initiator none)))
+        )
+       ;; For tokens on other chains, call adapter contract
+        (as-contract (try! (contract-call? (get adapter-contract source-chain-info) release-funds source-token net-amount (as-contract tx-sender) initiator)))
+      )
+      
+      ;; Update available liquidity
+      (map-set liquidity-pools
+        { chain-id: source-chain, token-id: source-token }
+        (merge source-pool {
+          committed-liquidity: (- (get committed-liquidity source-pool) net-amount),
+          available-liquidity: (+ (get available-liquidity source-pool) net-amount),
+          last-updated: block-height
+        })
+      )
+      
+      ;; Mark swap as refunded
+      (map-set swaps
+        { swap-id: swap-id }
+        (merge swap {
+          status: u2, ;; Refunded
+          completion-block: (some block-height)
+        })
+      )
+      
+      ;; Transfer protocol fee to treasury
+      (as-contract (try! (stx-transfer? protocol-fee (as-contract tx-sender) (var-get treasury-address))))
+      
+      (ok { 
+        swap-id: swap-id, 
+        refunded-amount: net-amount,
+        fee-kept: protocol-fee
+      })
+    )
+  )
+)
+
+;; Find optimal route for cross-chain swap
+(define-public (find-optimal-route
+  (source-chain (string-ascii 20))
+  (source-token (string-ascii 20))
+  (source-amount uint)
+  (target-chain (string-ascii 20))
