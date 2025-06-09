@@ -396,3 +396,44 @@
     (chain (unwrap! (map-get? chains { chain-id: chain-id }) err-chain-not-found))
   )
     ;; Check for emergency shutdown
+     (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+    ;; Validate parameters
+    (asserts! (get active pool) err-inactive-pool)
+    (asserts! (get enabled chain) err-chain-not-found)
+    (asserts! (> amount (var-get min-liquidity)) err-invalid-parameters)
+    
+    ;; Transfer tokens to contract
+    (if (is-eq chain-id "stacks")
+      ;; For STX tokens
+      (if (is-eq token-id "stx")
+        (try! (stx-transfer? amount provider (as-contract tx-sender)))
+        ;; For other tokens on Stacks
+        (try! (contract-call? (get token-contract pool) transfer amount provider (as-contract tx-sender) none))
+      )
+      ;; For tokens on other chains, call adapter contract
+      (try! (contract-call? (get adapter-contract chain) lock-funds token-id amount provider (as-contract tx-sender)))
+    )
+    
+    ;; Update pool liquidity
+    (map-set liquidity-pools
+      { chain-id: chain-id, token-id: token-id }
+      (merge pool {
+        total-liquidity: (+ (get total-liquidity pool) amount),
+        available-liquidity: (+ (get available-liquidity pool) amount),
+        last-updated: block-height
+      })
+    )
+    
+    ;; Update liquidity provider record
+    (let (
+      (provider-record (default-to {
+                         liquidity-amount: u0,
+                         rewards-earned: u0,
+                         last-deposit-block: block-height,
+                         last-withdrawal-block: none
+                       } (map-get? liquidity-providers { chain-id: chain-id, token-id: token-id, provider: provider })))
+    )
+      (map-set liquidity-providers
+        { chain-id: chain-id, token-id: token-id, provider: provider }
+        (merge provider-record {
