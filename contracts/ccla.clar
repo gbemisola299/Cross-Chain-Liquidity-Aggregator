@@ -353,3 +353,207 @@
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     
+   ;; Validate each chain exists
+    (asserts! (all-chains-exist specialized-chains) err-chain-not-found)
+    
+    ;; Create relayer record
+    (map-set relayers
+      { relayer: relayer }
+      {
+        authorized: true,
+        stake-amount: u0,
+        transactions-processed: u0,
+        cumulative-fees-earned: u0,
+        last-active: block-height,
+        accuracy-score: u80, ;; Start with 80/100 score
+        specialized-chains: specialized-chains
+      }
+    )
+    
+    (ok relayer)
+  )
+)
+
+;; Helper to verify all chains exist
+(define-private (all-chains-exist (chain-list (list 10 (string-ascii 20))))
+  (fold check-chain-exists true chain-list)
+)
+
+;; Helper to check if a chain exists
+(define-private (check-chain-exists (result bool) (chain-id (string-ascii 20)))
+  (and result (is-some (map-get? chains { chain-id: chain-id })))
+)
+
+;; Add liquidity to a pool
+(define-public (add-liquidity
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (amount uint))
+  
+  (let (
+    (provider tx-sender)
+    (pool (unwrap! (map-get? liquidity-pools { chain-id: chain-id, token-id: token-id }) err-pool-not-found))
+    (chain (unwrap! (map-get? chains { chain-id: chain-id }) err-chain-not-found))
+  )
+    ;; Check for emergency shutdown
+     (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+    ;; Validate parameters
+    (asserts! (get active pool) err-inactive-pool)
+    (asserts! (get enabled chain) err-chain-not-found)
+    (asserts! (> amount (var-get min-liquidity)) err-invalid-parameters)
+    
+    ;; Transfer tokens to contract
+    (if (is-eq chain-id "stacks")
+      ;; For STX tokens
+      (if (is-eq token-id "stx")
+        (try! (stx-transfer? amount provider (as-contract tx-sender)))
+        ;; For other tokens on Stacks
+        (try! (contract-call? (get token-contract pool) transfer amount provider (as-contract tx-sender) none))
+      )
+      ;; For tokens on other chains, call adapter contract
+      (try! (contract-call? (get adapter-contract chain) lock-funds token-id amount provider (as-contract tx-sender)))
+    )
+    
+    ;; Update pool liquidity
+    (map-set liquidity-pools
+      { chain-id: chain-id, token-id: token-id }
+      (merge pool {
+        total-liquidity: (+ (get total-liquidity pool) amount),
+        available-liquidity: (+ (get available-liquidity pool) amount),
+        last-updated: block-height
+      })
+    )
+    
+    ;; Update liquidity provider record
+    (let (
+      (provider-record (default-to {
+                         liquidity-amount: u0,
+                         rewards-earned: u0,
+                         last-deposit-block: block-height,
+                         last-withdrawal-block: none
+                       } (map-get? liquidity-providers { chain-id: chain-id, token-id: token-id, provider: provider })))
+    )
+      (map-set liquidity-providers
+        { chain-id: chain-id, token-id: token-id, provider: provider }
+        (merge provider-record {
+         liquidity-amount: (+ (get liquidity-amount provider-record) amount),
+          last-deposit-block: block-height
+        })
+      )
+    )
+    
+    (ok amount)
+  )
+)
+
+;; Remove liquidity from a pool
+(define-public (remove-liquidity
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (amount uint))
+  
+  (let (
+    (provider tx-sender)
+    (pool (unwrap! (map-get? liquidity-pools { chain-id: chain-id, token-id: token-id }) err-pool-not-found))
+    (chain (unwrap! (map-get? chains { chain-id: chain-id }) err-chain-not-found))
+    (provider-record (unwrap! (map-get? liquidity-providers 
+                                        { chain-id: chain-id, token-id: token-id, provider: provider }) 
+                              err-not-authorized))
+  )
+    ;; Validate parameters
+    (asserts! (<= amount (get liquidity-amount provider-record)) err-insufficient-funds)
+    (asserts! (<= amount (get available-liquidity pool)) err-insufficient-liquidity)
+    
+    ;; Update pool liquidity
+    (map-set liquidity-pools
+      { chain-id: chain-id, token-id: token-id }
+      (merge pool {
+        total-liquidity: (- (get total-liquidity pool) amount),
+        available-liquidity: (- (get available-liquidity pool) amount),
+        last-updated: block-height
+      })
+    )
+    
+    ;; Update liquidity provider record
+    (map-set liquidity-providers
+      { chain-id: chain-id, token-id: token-id, provider: provider }
+      (merge provider-record {
+        liquidity-amount: (- (get liquidity-amount provider-record) amount),
+    last-withdrawal-block: (some block-height)
+      })
+    )
+    
+    ;; Transfer tokens back to provider
+    (if (is-eq chain-id "stacks")
+      ;; For STX tokens
+      (if (is-eq token-id "stx")
+        (as-contract (try! (stx-transfer? amount (as-contract tx-sender) provider)))
+        ;; For other tokens on Stacks
+        (as-contract (try! (contract-call? (get token-contract pool) transfer amount (as-contract tx-sender) provider none)))
+      )
+      ;; For tokens on other chains, call adapter contract
+      (as-contract (try! (contract-call? (get adapter-contract chain) release-funds token-id amount (as-contract tx-sender) provider)))
+    )
+    
+    (ok amount)
+  )
+)
+;; Initiate a cross-chain swap
+(define-public (initiate-cross-chain-swap
+  (source-chain (string-ascii 20))
+  (source-token (string-ascii 20))
+  (source-amount uint)
+  (target-chain (string-ascii 20))
+  (target-token (string-ascii 20))
+  (recipient principal)
+  (hash-lock (buff 32))
+  (execution-path (list 5 { chain: (string-ascii 20), token: (string-ascii 20), pool: principal }))
+  (slippage-bp uint))
+  
+  (let (
+    (initiator tx-sender)
+    (swap-id (var-get next-swap-id))
+    (timeout-block (+ block-height (var-get default-timeout-blocks)))
+    (routing-valid (validate-execution-path source-chain source-token target-chain target-token execution-path))
+  )
+    ;; Check for emergency shutdown
+    (asserts! (not (var-get emergency-shutdown)) err-emergency-shutdown)
+    
+       ;; Validate parameters
+    (asserts! (is-ok routing-valid) err-invalid-path)
+    (asserts! (<= slippage-bp (var-get max-slippage-bp)) err-invalid-parameters)
+    (asserts! (not (is-eq source-chain target-chain)) err-invalid-parameters) ;; Must be cross-chain
+    
+    ;; Check source chain and token exist
+    (let (
+      (source-pool (unwrap! (map-get? liquidity-pools { chain-id: source-chain, token-id: source-token }) err-pool-not-found))
+      (source-chain-info (unwrap! (map-get? chains { chain-id: source-chain }) err-chain-not-found))
+      (estimated-output (unwrap! (get-estimated-output source-chain source-token source-amount target-chain target-token) err-invalid-route))
+    )
+      ;; Validate swap amount
+      (asserts! (>= source-amount (get min-swap-amount source-pool)) err-invalid-parameters)
+      (asserts! (<= source-amount (get max-swap-amount source-pool)) err-invalid-parameters)
+      (asserts! (<= source-amount (get available-liquidity source-pool)) err-insufficient-liquidity)
+      
+      ;; Calculate fees
+      (let (
+        (protocol-fee (/ (* source-amount (var-get protocol-fee-bp)) u10000))
+        (pool-fee (/ (* source-amount (get fee-bp source-pool)) u10000))
+        (relayer-fee (/ (* protocol-fee (var-get relayer-reward-percentage)) u100))
+        (total-fee (+ protocol-fee pool-fee))
+        (net-amount (- source-amount total-fee))
+        (ref-hash (generate-ref-hash swap-id hash-lock block-height))
+      )
+        ;; Lock source tokens in contract
+        (if (is-eq source-chain "stacks")
+          ;; For STX tokens
+          (if (is-eq source-token "stx")
+            (try! (stx-transfer? source-amount initiator (as-contract tx-sender)))
+            ;; For other tokens on Stacks
+            (try! (contract-call? (get token-contract source-pool) transfer source-amount initiator (as-contract tx-sender) none))
+          )
+          ;; For tokens on other chains, call adapter contract
+          (try! (contract-call? (get adapter-contract source-chain-info) lock-funds source-token source-amount initiator (as-contract tx-sender)))
+        )
+        
