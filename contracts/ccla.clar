@@ -1234,3 +1234,38 @@
       "Not Found"
     )
   )
+
+)
+
+;; Get swap status as string
+(define-read-only (get-swap-status-string (swap-id uint))
+  (let (
+    (swap (map-get? swaps { swap-id: swap-id }))
+  )
+    (if (is-some swap)
+      (let (
+        (status (get status (unwrap-panic swap)))
+        (status-list (var-get swap-statuses))
+      )
+        (default-to "Unknown" (element-at status-list status))
+      )
+      "Not Found"
+    )
+  )
+)
+
+;; Get protocol parameters
+(define-read-only (get-protocol-parameters)
+  {
+    protocol-fee-bp: (var-get protocol-fee-bp),
+    max-slippage-bp: (var-get max-slippage-bp),
+    min-liquidity: (var-get min-liquidity),
+    default-timeout-blocks: (var-get default-timeout-blocks),
+    max-route-hops: (var-get max-route-hops),
+    treasury-address: (var-get treasury-address),
+    emergency-shutdown: (var-get emergency-shutdown),
+    price-deviation-threshold: (var-get price-deviation-threshold),
+    relayer-reward-percentage: (var-get relayer-reward-percentage)
+  }
+)
+
