@@ -766,3 +766,44 @@
           ;; For other tokens on Stacks
           (as-contract (try! (contract-call? (get token-contract source-pool) transfer net-amount (as-contract tx-sender) initiator none)))
         )
+       ;; For tokens on other chains, call adapter contract
+        (as-contract (try! (contract-call? (get adapter-contract source-chain-info) release-funds source-token net-amount (as-contract tx-sender) initiator)))
+      )
+      
+      ;; Update available liquidity
+      (map-set liquidity-pools
+        { chain-id: source-chain, token-id: source-token }
+        (merge source-pool {
+          committed-liquidity: (- (get committed-liquidity source-pool) net-amount),
+          available-liquidity: (+ (get available-liquidity source-pool) net-amount),
+          last-updated: block-height
+        })
+      )
+      
+      ;; Mark swap as refunded
+      (map-set swaps
+        { swap-id: swap-id }
+        (merge swap {
+          status: u2, ;; Refunded
+          completion-block: (some block-height)
+        })
+      )
+      
+      ;; Transfer protocol fee to treasury
+      (as-contract (try! (stx-transfer? protocol-fee (as-contract tx-sender) (var-get treasury-address))))
+      
+      (ok { 
+        swap-id: swap-id, 
+        refunded-amount: net-amount,
+        fee-kept: protocol-fee
+      })
+    )
+  )
+)
+
+;; Find optimal route for cross-chain swap
+(define-public (find-optimal-route
+  (source-chain (string-ascii 20))
+  (source-token (string-ascii 20))
+  (source-amount uint)
+  (target-chain (string-ascii 20))
