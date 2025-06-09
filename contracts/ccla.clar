@@ -643,3 +643,46 @@
       (target-token (get target-token swap))
       (target-amount (get target-amount swap))
       (recipient (get recipient swap))
+ 
+      (target-pool (unwrap! (map-get? liquidity-pools { chain-id: target-chain, token-id: target-token }) err-pool-not-found))
+      (target-chain-info (unwrap! (map-get? chains { chain-id: target-chain }) err-chain-not-found))
+      (is-relayer (is-some (map-get? relayers { relayer: executor })))
+      (slippage-bp (get max-slippage-bp swap))
+    )
+      ;; Check sufficient liquidity
+      (asserts! (>= (get available-liquidity target-pool) target-amount) err-insufficient-liquidity)
+      
+      ;; Calculate minimum acceptable amount with slippage
+      (let (
+        (min-acceptable-amount (- target-amount (/ (* target-amount slippage-bp) u10000)))
+      )
+        ;; If swap is executed by a relayer, update relayer stats
+        (if is-relayer
+          (let (
+            (relayer-record (unwrap-panic (map-get? relayers { relayer: executor })))
+            (relayer-fee (get relayer-fee swap))
+          )
+            (map-set relayers
+              { relayer: executor }
+              (merge relayer-record {
+                transactions-processed: (+ (get transactions-processed relayer-record) u1),
+                cumulative-fees-earned: (+ (get cumulative-fees-earned relayer-record) relayer-fee),
+                last-active: block-height
+              })
+            )
+            
+            ;; Update swap with relayer info
+            (map-set swaps
+              { swap-id: swap-id }
+              (merge swap {
+                relayer: (some executor)
+              })
+            )
+            
+            ;; Process relayer payment - from protocol fees
+            (as-contract (try! (stx-transfer? relayer-fee (as-contract tx-sender) executor)))
+          )
+          true
+        )
+        
+        ;; Release target tokens to recipient
