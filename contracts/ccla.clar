@@ -807,3 +807,87 @@
   (source-token (string-ascii 20))
   (source-amount uint)
   (target-chain (string-ascii 20))
+   (target-token (string-ascii 20)))
+  
+  (let (
+    (route-id (var-get next-route-id))
+    (best-path (get-optimal-path source-chain source-token target-chain target-token))
+    (estimated-output (get-estimated-output source-chain source-token source-amount target-chain target-token))
+  )
+    (asserts! (is-ok best-path) err-invalid-route)
+    (asserts! (is-ok estimated-output) err-invalid-route)
+    
+    (let (
+      (path (unwrap-panic best-path))
+      (output (unwrap-panic estimated-output))
+      (protocol-fee (/ (* source-amount (var-get protocol-fee-bp)) u10000))
+      (gas-estimate (estimate-gas-cost path))
+    )
+      ;; Cache the route
+      (map-set route-cache
+        { route-id: route-id }
+        {
+          source-chain: source-chain,
+          source-token: source-token,
+          target-chain: target-chain,
+          target-token: target-token,
+          path: path,
+          estimated-output: output,
+          estimated-fees: protocol-fee,
+          timestamp: block-height,
+          expiry: (+ block-height u72), ;; 12 hour route cache
+          gas-estimate: gas-estimate
+        }
+      )
+      
+      ;; Increment route ID
+      (var-set next-route-id (+ route-id u1))
+      
+      (ok { 
+        route-id: route-id, 
+        path: path,
+        estimated-output: output,
+        estimated-fees: protocol-fee,
+        gas-estimate: gas-estimate
+           
+      })
+    )
+  )
+)
+
+;; Helper to get optimal path (simplified version)
+(define-private (get-optimal-path
+  (source-chain (string-ascii 20))
+  (source-token (string-ascii 20))
+  (target-chain (string-ascii 20))
+  (target-token (string-ascii 20)))
+  
+  ;; In a real implementation, this would use a graph algorithm to find optimal paths
+  ;; For demonstration, we'll create a simple direct path
+  (let (
+    (source-pool (map-get? liquidity-pools { chain-id: source-chain, token-id: source-token }))
+    (target-pool (map-get? liquidity-pools { chain-id: target-chain, token-id: target-token }))
+    (token-mapping (map-get? token-mappings { 
+      source-chain: source-chain, 
+      source-token: source-token, 
+      target-chain: target-chain 
+    }))
+  )
+    (if (and (is-some source-pool) (is-some target-pool) (is-some token-mapping))
+      (ok (list 
+        { chain: source-chain, token: source-token, pool: (get token-contract (unwrap-panic source-pool)) }
+        { chain: target-chain, token: target-token, pool: (get token-contract (unwrap-panic target-pool)) }
+      ))
+      err-invalid-route
+    )
+  )
+)  
+;; Helper to estimate output amount
+(define-private (get-estimated-output
+  (source-chain (string-ascii 20))
+  (source-token (string-ascii 20))
+  (source-amount uint)
+  (target-chain (string-ascii 20))
+  (target-token (string-ascii 20)))
+  
+  (let (
