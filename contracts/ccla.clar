@@ -52,3 +52,31 @@
 ;; 0 = Pending, 1 = Completed, 2 = Refunded, 3 = Expired
 (define-data-var swap-statuses (list 4 (string-ascii 10)) (list "Pending" "Completed" "Refunded" "Expired"))
 
+;; Supported blockchains
+(define-map chains
+  { chain-id: (string-ascii 20) }
+  {
+    name: (string-ascii 40),
+    adapter-contract: principal,
+    status: uint,
+    confirmation-blocks: uint,
+    block-time: uint, ;; Average block time in seconds
+    chain-token: (string-ascii 10), ;; Chain's native token symbol
+    btc-connection-type: (string-ascii 20), ;; "native", "wrapped", "bridged"
+    enabled: bool,
+    base-fee: uint, ;; Base fee for transactions on this chain
+    fee-multiplier: uint, ;; Dynamic fee multiplier
+    last-updated: uint
+  }
+)
+
+;; Liquidity pools
+(define-map liquidity-pools
+  { chain-id: (string-ascii 20), token-id: (string-ascii 20) }
+  {
+    token-contract: principal,
+    total-liquidity: uint,
+    available-liquidity: uint,
+    committed-liquidity: uint,
+    min-swap-amount: uint,
+    max-swap-amount: uint,
