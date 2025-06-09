@@ -108,3 +108,248 @@
     target-chain: (string-ascii 20),
     target-token: (string-ascii 20),
     target-amount: uint,
+  recipient: principal,
+    timeout-block: uint,
+    hash-lock: (buff 32),
+    preimage: (optional (buff 32)),
+    status: uint,
+    execution-path: (list 5 { chain: (string-ascii 20), token: (string-ascii 20), pool: principal }),
+    max-slippage-bp: uint,
+    protocol-fee: uint,
+    relayer-fee: uint,
+    relayer: (optional principal),
+    creation-block: uint,
+    completion-block: (optional uint),
+    ref-hash: (string-ascii 64) ;; Reference hash for cross-chain tracking
+  }
+)
+
+;; Price oracles for tokens
+(define-map price-oracles
+  { chain-id: (string-ascii 20), token-id: (string-ascii 20) }
+  {
+    oracle-contract: principal,
+    last-price: uint, ;; In STX with 8 decimal precision
+    last-updated: uint,
+    heartbeat: uint, ;; Maximum time between updates in blocks
+    deviation-threshold: uint, ;; Max allowed deviation in basis points
+    trusted: bool
+  }
+)
+;; Authorized relayers
+(define-map relayers
+  { relayer: principal }
+  {
+    authorized: bool,
+    stake-amount: uint,
+    transactions-processed: uint,
+    cumulative-fees-earned: uint,
+    last-active: uint,
+    accuracy-score: uint, ;; 0-100 score
+    specialized-chains: (list 10 (string-ascii 20))
+  }
+)
+
+;; Optimal routes cache
+(define-map route-cache
+  { route-id: uint }
+  {
+    source-chain: (string-ascii 20),
+    source-token: (string-ascii 20),
+    target-chain: (string-ascii 20),
+    target-token: (string-ascii 20),
+    path: (list 5 { chain: (string-ascii 20), token: (string-ascii 20), pool: principal }),
+    estimated-output: uint,
+    estimated-fees: uint,
+    timestamp: uint,
+    expiry: uint,
+    gas-estimate: uint
+  }
+)
+
+;; Liquidity provider records
+(define-map liquidity-providers
+  { chain-id: (string-ascii 20), token-id: (string-ascii 20), provider: principal }
+  {
+    liquidity-amount: uint,
+    rewards-earned: uint,
+    last-deposit-block: uint,
+    last-withdrawal-block: (optional uint)
+  }
+)
+
+;; Initialize contract
+   
+(define-public (initialize (treasury principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set treasury-address treasury)
+    (var-set protocol-fee-bp u25) ;; 0.25%
+    (var-set max-slippage-bp u100) ;; 1%
+    (var-set min-liquidity u1000000) ;; 1 STX
+    (var-set default-timeout-blocks u144) ;; ~24 hours
+    (var-set emergency-shutdown false)
+    
+    ;; Mint initial protocol tokens
+    (try! (ft-mint? xchain-token u1000000000000 treasury))
+    
+    (ok true)
+  )
+)
+
+;; Register a new blockchain
+(define-public (register-chain
+  (chain-id (string-ascii 20))
+  (name (string-ascii 40))
+  (adapter-contract principal)
+  (confirmation-blocks uint)
+  (block-time uint)
+  (chain-token (string-ascii 10))
+  (btc-connection-type (string-ascii 20))
+  (base-fee uint)
+  (fee-multiplier uint))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-none (map-get? chains { chain-id: chain-id })) err-chain-exists)
+    
+    ;; Validate parameters
+    (asserts! (> confirmation-blocks u0) err-invalid-parameters)
+    (asserts! (> block-time u0) err-invalid-parameters)
+    (asserts! (or (is-eq btc-connection-type "native") 
+                (is-eq btc-connection-type "wrapped") 
+                (is-eq btc-connection-type "bridged")) 
+              err-invalid-parameters)
+    
+    ;; Create chain record
+    (map-set chains
+     { chain-id: chain-id }
+      {
+        name: name,
+        adapter-contract: adapter-contract,
+        status: u0, ;; Active
+        confirmation-blocks: confirmation-blocks,
+        block-time: block-time,
+        chain-token: chain-token,
+        btc-connection-type: btc-connection-type,
+        enabled: true,
+        base-fee: base-fee,
+        fee-multiplier: fee-multiplier,
+        last-updated: block-height
+      }
+    )
+    
+    (ok chain-id)
+  )
+)
+
+;; Register a liquidity pool
+(define-public (register-pool
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (token-contract principal)
+  (min-swap-amount uint)
+  (max-swap-amount uint)
+  (fee-bp uint))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-some (map-get? chains { chain-id: chain-id })) err-chain-not-found)
+    (asserts! (is-none (map-get? liquidity-pools { chain-id: chain-id, token-id: token-id })) err-pool-exists)
+    
+    ;; Validate parameters
+    (asserts! (< min-swap-amount max-swap-amount) err-invalid-parameters)
+    (asserts! (<= fee-bp u1000) err-invalid-parameters) ;; Maximum 10% fee
+    
+    ;; Create pool record
+    (map-set liquidity-pools
+      { chain-id: chain-id, token-id: token-id }
+      {
+        token-contract: token-contract,
+    total-liquidity: u0,
+        available-liquidity: u0,
+        committed-liquidity: u0,
+        min-swap-amount: min-swap-amount,
+        max-swap-amount: max-swap-amount,
+        fee-bp: fee-bp,
+        active: true,
+        last-volume-24h: u0,
+        cumulative-volume: u0,
+        cumulative-fees: u0,
+        last-price: u0,
+        creation-block: block-height,
+        last-updated: block-height
+      }
+    )
+       (ok { chain: chain-id, token: token-id })
+  )
+)
+
+;; Map a token across chains
+(define-public (map-token
+  (source-chain (string-ascii 20))
+  (source-token (string-ascii 20))
+  (target-chain (string-ascii 20))
+  (target-token (string-ascii 20)))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-some (map-get? chains { chain-id: source-chain })) err-chain-not-found)
+    (asserts! (is-some (map-get? chains { chain-id: target-chain })) err-chain-not-found)
+    
+    ;; Create token mapping
+    (map-set token-mappings
+      { source-chain: source-chain, source-token: source-token, target-chain: target-chain }
+      { target-token: target-token }
+    )
+    
+    ;; Create reverse mapping
+    (map-set token-mappings
+      { source-chain: target-chain, source-token: target-token, target-chain: source-chain }
+      { target-token: source-token }
+    )
+    
+    (ok true)
+       )
+)
+
+;; Register a price oracle
+(define-public (register-oracle
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (oracle-contract principal)
+  (heartbeat uint)
+  (deviation-threshold uint))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-some (map-get? chains { chain-id: chain-id })) err-chain-not-found)
+    
+    ;; Validate parameters
+    (asserts! (> heartbeat u0) err-invalid-parameters)
+    (asserts! (< deviation-threshold u10000) err-invalid-parameters) ;; Max 100% deviation threshold
+    
+    ;; Create oracle record
+    (map-set price-oracles
+      { chain-id: chain-id, token-id: token-id }
+      {
+        oracle-contract: oracle-contract,
+        last-price: u0,
+        last-updated: block-height,
+        heartbeat: heartbeat,
+        deviation-threshold: deviation-threshold,
+        trusted: true
+      }
+    )
+      (ok { chain: chain-id, token: token-id, oracle: oracle-contract })
+  )
+)
+
+;; Authorize a relayer
+(define-public (authorize-relayer
+  (relayer principal)
+  (specialized-chains (list 10 (string-ascii 20))))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    
