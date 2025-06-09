@@ -310,3 +310,46 @@
     )
     
     (ok true)
+       )
+)
+
+;; Register a price oracle
+(define-public (register-oracle
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (oracle-contract principal)
+  (heartbeat uint)
+  (deviation-threshold uint))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-some (map-get? chains { chain-id: chain-id })) err-chain-not-found)
+    
+    ;; Validate parameters
+    (asserts! (> heartbeat u0) err-invalid-parameters)
+    (asserts! (< deviation-threshold u10000) err-invalid-parameters) ;; Max 100% deviation threshold
+    
+    ;; Create oracle record
+    (map-set price-oracles
+      { chain-id: chain-id, token-id: token-id }
+      {
+        oracle-contract: oracle-contract,
+        last-price: u0,
+        last-updated: block-height,
+        heartbeat: heartbeat,
+        deviation-threshold: deviation-threshold,
+        trusted: true
+      }
+    )
+      (ok { chain: chain-id, token: token-id, oracle: oracle-contract })
+  )
+)
+
+;; Authorize a relayer
+(define-public (authorize-relayer
+  (relayer principal)
+  (specialized-chains (list 10 (string-ascii 20))))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    
