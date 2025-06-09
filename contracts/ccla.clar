@@ -891,3 +891,45 @@
   (target-token (string-ascii 20)))
   
   (let (
+  (source-pool (map-get? liquidity-pools { chain-id: source-chain, token-id: source-token }))
+    (target-pool (map-get? liquidity-pools { chain-id: target-chain, token-id: target-token }))
+    (source-oracle (map-get? price-oracles { chain-id: source-chain, token-id: source-token }))
+    (target-oracle (map-get? price-oracles { chain-id: target-chain, token-id: target-token }))
+  )
+    (if (and (is-some source-pool) (is-some target-pool) (is-some source-oracle) (is-some target-oracle))
+      (let (
+        (source-price (get last-price (unwrap-panic source-oracle)))
+        (target-price (get last-price (unwrap-panic target-oracle)))
+        (protocol-fee (/ (* source-amount (var-get protocol-fee-bp)) u10000))
+        (pool-fee (/ (* source-amount (get fee-bp (unwrap-panic source-pool))) u10000))
+        (total-fee (+ protocol-fee pool-fee))
+        (net-amount (- source-amount total-fee))
+        (source-value (* net-amount source-price))
+        (target-amount (/ source-value target-price))
+      )
+        (ok target-amount)
+      )
+      err-invalid-route
+    )
+  )
+)
+
+;; Helper to estimate gas cost for a path
+(define-private (estimate-gas-cost (path (list 5 { chain: (string-ascii 20), token: (string-ascii 20), pool: principal })))
+  ;; In a real implementation, this would calculate gas costs for each hop
+  ;; For now, we'll provide a simple estimate based on number of hops
+  (* (len path) u1000000) ;; 1 STX per hop
+)
+
+;; Validate execution path
+(define-private (validate-execution-path
+  (source-chain (string-ascii 20))
+  (source-token (string-ascii 20))
+  (target-chain (string-ascii 20))
+  (target-token (string-ascii 20))
+  (path (list 5 { chain: (string-ascii 20), token: (string-ascii 20), pool: principal })))
+  
+  (let (
+    (path-length (len path))
+    (first-hop (unwrap! (element-at path u0) err-invalid-path))
+    (last-hop (unwrap! (element-at path (- path-length u1)) err-invalid-path))
