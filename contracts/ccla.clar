@@ -353,3 +353,46 @@
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     
+   ;; Validate each chain exists
+    (asserts! (all-chains-exist specialized-chains) err-chain-not-found)
+    
+    ;; Create relayer record
+    (map-set relayers
+      { relayer: relayer }
+      {
+        authorized: true,
+        stake-amount: u0,
+        transactions-processed: u0,
+        cumulative-fees-earned: u0,
+        last-active: block-height,
+        accuracy-score: u80, ;; Start with 80/100 score
+        specialized-chains: specialized-chains
+      }
+    )
+    
+    (ok relayer)
+  )
+)
+
+;; Helper to verify all chains exist
+(define-private (all-chains-exist (chain-list (list 10 (string-ascii 20))))
+  (fold check-chain-exists true chain-list)
+)
+
+;; Helper to check if a chain exists
+(define-private (check-chain-exists (result bool) (chain-id (string-ascii 20)))
+  (and result (is-some (map-get? chains { chain-id: chain-id })))
+)
+
+;; Add liquidity to a pool
+(define-public (add-liquidity
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (amount uint))
+  
+  (let (
+    (provider tx-sender)
+    (pool (unwrap! (map-get? liquidity-pools { chain-id: chain-id, token-id: token-id }) err-pool-not-found))
+    (chain (unwrap! (map-get? chains { chain-id: chain-id }) err-chain-not-found))
+  )
+    ;; Check for emergency shutdown
