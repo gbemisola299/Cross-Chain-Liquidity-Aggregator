@@ -80,3 +80,31 @@
     committed-liquidity: uint,
     min-swap-amount: uint,
     max-swap-amount: uint,
+   fee-bp: uint, ;; Fee in basis points
+    active: bool,
+    last-volume-24h: uint,
+    cumulative-volume: uint,
+    cumulative-fees: uint,
+    last-price: uint, ;; Last price in STX
+    creation-block: uint,
+    last-updated: uint
+  }
+)
+
+;; Token mappings across chains
+(define-map token-mappings
+  { source-chain: (string-ascii 20), source-token: (string-ascii 20), target-chain: (string-ascii 20) }
+  { target-token: (string-ascii 20) }
+)
+
+;; Cross-chain swaps
+(define-map swaps
+  { swap-id: uint }
+  {
+    initiator: principal,
+    source-chain: (string-ascii 20),
+    source-token: (string-ascii 20),
+    source-amount: uint,
+    target-chain: (string-ascii 20),
+    target-token: (string-ascii 20),
+    target-amount: uint,
