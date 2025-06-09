@@ -437,3 +437,46 @@
       (map-set liquidity-providers
         { chain-id: chain-id, token-id: token-id, provider: provider }
         (merge provider-record {
+         liquidity-amount: (+ (get liquidity-amount provider-record) amount),
+          last-deposit-block: block-height
+        })
+      )
+    )
+    
+    (ok amount)
+  )
+)
+
+;; Remove liquidity from a pool
+(define-public (remove-liquidity
+  (chain-id (string-ascii 20))
+  (token-id (string-ascii 20))
+  (amount uint))
+  
+  (let (
+    (provider tx-sender)
+    (pool (unwrap! (map-get? liquidity-pools { chain-id: chain-id, token-id: token-id }) err-pool-not-found))
+    (chain (unwrap! (map-get? chains { chain-id: chain-id }) err-chain-not-found))
+    (provider-record (unwrap! (map-get? liquidity-providers 
+                                        { chain-id: chain-id, token-id: token-id, provider: provider }) 
+                              err-not-authorized))
+  )
+    ;; Validate parameters
+    (asserts! (<= amount (get liquidity-amount provider-record)) err-insufficient-funds)
+    (asserts! (<= amount (get available-liquidity pool)) err-insufficient-liquidity)
+    
+    ;; Update pool liquidity
+    (map-set liquidity-pools
+      { chain-id: chain-id, token-id: token-id }
+      (merge pool {
+        total-liquidity: (- (get total-liquidity pool) amount),
+        available-liquidity: (- (get available-liquidity pool) amount),
+        last-updated: block-height
+      })
+    )
+    
+    ;; Update liquidity provider record
+    (map-set liquidity-providers
+      { chain-id: chain-id, token-id: token-id, provider: provider }
+      (merge provider-record {
+        liquidity-amount: (- (get liquidity-amount provider-record) amount),
