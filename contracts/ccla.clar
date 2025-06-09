@@ -686,3 +686,44 @@
         )
         
         ;; Release target tokens to recipient
+     (if (is-eq target-chain "stacks")
+          ;; For STX tokens
+          (if (is-eq target-token "stx")
+            (as-contract (try! (stx-transfer? target-amount (as-contract tx-sender) recipient)))
+            ;; For other tokens on Stacks
+            (as-contract (try! (contract-call? (get token-contract target-pool) transfer target-amount (as-contract tx-sender) recipient none)))
+          )
+          ;; For tokens on other chains, call adapter contract
+          (as-contract (try! (contract-call? (get adapter-contract target-chain-info) release-funds target-token target-amount (as-contract tx-sender) recipient)))
+        )
+        
+        ;; Update available liquidity
+        (map-set liquidity-pools
+          { chain-id: target-chain, token-id: target-token }
+          (merge target-pool {
+            available-liquidity: (- (get available-liquidity target-pool) target-amount),
+            committed-liquidity: (+ (get committed-liquidity target-pool) target-amount),
+            last-volume-24h: (+ (get last-volume-24h target-pool) target-amount),
+            cumulative-volume: (+ (get cumulative-volume target-pool) target-amount),
+            last-updated: block-height
+          })
+        )
+        
+        ;; Mark swap as completed
+        (map-set swaps
+          { swap-id: swap-id }
+          (merge swap {
+            status: u1, ;; Completed
+            preimage: (some preimage),
+            completion-block: (some block-height)
+          })
+        )
+        
+        ;; Transfer protocol fee to treasury (minus relayer fee if applicable)
+        (let (
+          (protocol-fee (get protocol-fee swap))
+          (relayer-fee (get relayer-fee swap))
+          (treasury-amount (- protocol-fee (if is-relayer relayer-fee u0)))
+        )
+          (as-contract (try! (stx-transfer? treasury-amount (as-contract tx-sender) (var-get treasury-address))))
+        )
