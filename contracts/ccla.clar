@@ -136,3 +136,90 @@
     trusted: bool
   }
 )
+;; Authorized relayers
+(define-map relayers
+  { relayer: principal }
+  {
+    authorized: bool,
+    stake-amount: uint,
+    transactions-processed: uint,
+    cumulative-fees-earned: uint,
+    last-active: uint,
+    accuracy-score: uint, ;; 0-100 score
+    specialized-chains: (list 10 (string-ascii 20))
+  }
+)
+
+;; Optimal routes cache
+(define-map route-cache
+  { route-id: uint }
+  {
+    source-chain: (string-ascii 20),
+    source-token: (string-ascii 20),
+    target-chain: (string-ascii 20),
+    target-token: (string-ascii 20),
+    path: (list 5 { chain: (string-ascii 20), token: (string-ascii 20), pool: principal }),
+    estimated-output: uint,
+    estimated-fees: uint,
+    timestamp: uint,
+    expiry: uint,
+    gas-estimate: uint
+  }
+)
+
+;; Liquidity provider records
+(define-map liquidity-providers
+  { chain-id: (string-ascii 20), token-id: (string-ascii 20), provider: principal }
+  {
+    liquidity-amount: uint,
+    rewards-earned: uint,
+    last-deposit-block: uint,
+    last-withdrawal-block: (optional uint)
+  }
+)
+
+;; Initialize contract
+   
+(define-public (initialize (treasury principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set treasury-address treasury)
+    (var-set protocol-fee-bp u25) ;; 0.25%
+    (var-set max-slippage-bp u100) ;; 1%
+    (var-set min-liquidity u1000000) ;; 1 STX
+    (var-set default-timeout-blocks u144) ;; ~24 hours
+    (var-set emergency-shutdown false)
+    
+    ;; Mint initial protocol tokens
+    (try! (ft-mint? xchain-token u1000000000000 treasury))
+    
+    (ok true)
+  )
+)
+
+;; Register a new blockchain
+(define-public (register-chain
+  (chain-id (string-ascii 20))
+  (name (string-ascii 40))
+  (adapter-contract principal)
+  (confirmation-blocks uint)
+  (block-time uint)
+  (chain-token (string-ascii 10))
+  (btc-connection-type (string-ascii 20))
+  (base-fee uint)
+  (fee-multiplier uint))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-none (map-get? chains { chain-id: chain-id })) err-chain-exists)
+    
+    ;; Validate parameters
+    (asserts! (> confirmation-blocks u0) err-invalid-parameters)
+    (asserts! (> block-time u0) err-invalid-parameters)
+    (asserts! (or (is-eq btc-connection-type "native") 
+                (is-eq btc-connection-type "wrapped") 
+                (is-eq btc-connection-type "bridged")) 
+              err-invalid-parameters)
+    
+    ;; Create chain record
+    (map-set chains
